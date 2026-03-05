@@ -10,8 +10,15 @@ impl Bitboard {
     pub const EMPTY: Bitboard = Bitboard(0);
 
     #[inline(always)]
-    pub const fn new(bits: u64) -> Self {
-        Bitboard(bits)
+    pub const fn from_square(sq: Square) -> Self {
+        debug_assert!((sq.0 as usize) < 64);
+        Bitboard(1u64 << sq.0)
+    }
+
+    #[inline(always)]
+    pub const fn from_index(index: u8) -> Self {
+        debug_assert!((index as usize) < 64);
+        Bitboard(1u64 << index)
     }
 
     /// Construct a Bitboard with the file's column set.
@@ -26,28 +33,9 @@ impl Bitboard {
         Bitboard(0xFFu64 << (8 * rank as u64))
     }
 
-    /// Construct a Bitboard with a single square set.
-    #[inline(always)]
-    pub const fn from_square(sq: Square) -> Self {
-        debug_assert!((sq.0 as usize) < 64);
-        Bitboard(1u64 << sq.0)
-    }
-
-    /// Construct a Bitboard with a single square index set.
-    #[inline(always)]
-    pub const fn from_index(index: u8) -> Self {
-        debug_assert!((index as usize) < 64);
-        Bitboard(1u64 << index)
-    }
-
     #[inline(always)]
     pub const fn is_empty(self) -> bool {
         self.0 == 0
-    }
-
-    #[inline(always)]
-    pub const fn get_bits(self) -> u64 {
-        self.0
     }
 
     /// Set a bit at `index`.
@@ -87,7 +75,7 @@ impl Bitboard {
     #[inline(always)]
     pub fn msb(self) -> u8 {
         debug_assert!(self.0 != 0);
-        (63 ^ self.0.leading_zeros()) as u8
+        63 - self.0.leading_zeros() as u8
     }
 
     /// Population count (number of set bits).
@@ -96,7 +84,6 @@ impl Bitboard {
         self.0.count_ones()
     }
 
-    /// Pop the least-significant bit, returning its index.
     #[inline(always)]
     pub fn pop(&mut self) -> u8 {
         debug_assert!(self.0 != 0);
@@ -106,125 +93,61 @@ impl Bitboard {
     }
 }
 
-// ---- bool conversion ----
+// ---- operators ----
 
-impl From<Bitboard> for bool {
-    #[inline(always)]
-    fn from(b: Bitboard) -> bool {
-        b.0 != 0
-    }
+macro_rules! impl_bitops {
+    ($($trait:ident, $method:ident, $assign_trait:ident, $assign_method:ident, $op:tt);* $(;)?) => {$(
+        impl $trait for Bitboard {
+            type Output = Self;
+            #[inline(always)]
+            fn $method(self, rhs: Self) -> Self { Bitboard(self.0 $op rhs.0) }
+        }
+        impl $trait<u64> for Bitboard {
+            type Output = Self;
+            #[inline(always)]
+            fn $method(self, rhs: u64) -> Self { Bitboard(self.0 $op rhs) }
+        }
+        impl $assign_trait for Bitboard {
+            #[inline(always)]
+            fn $assign_method(&mut self, rhs: Self) { self.0 = self.0 $op rhs.0; }
+        }
+    )*};
 }
 
-// ---- operators between Bitboard and Bitboard ----
-
-impl BitAnd for Bitboard {
-    type Output = Bitboard;
-    #[inline(always)]
-    fn bitand(self, rhs: Bitboard) -> Bitboard {
-        Bitboard(self.0 & rhs.0)
-    }
-}
-
-impl BitOr for Bitboard {
-    type Output = Bitboard;
-    #[inline(always)]
-    fn bitor(self, rhs: Bitboard) -> Bitboard {
-        Bitboard(self.0 | rhs.0)
-    }
-}
-
-impl BitXor for Bitboard {
-    type Output = Bitboard;
-    #[inline(always)]
-    fn bitxor(self, rhs: Bitboard) -> Bitboard {
-        Bitboard(self.0 ^ rhs.0)
-    }
+impl_bitops! {
+    BitAnd, bitand, BitAndAssign, bitand_assign, &;
+    BitOr,  bitor,  BitOrAssign,  bitor_assign,  |;
+    BitXor, bitxor, BitXorAssign, bitxor_assign, ^;
 }
 
 impl Not for Bitboard {
-    type Output = Bitboard;
+    type Output = Self;
     #[inline(always)]
-    fn not(self) -> Bitboard {
+    fn not(self) -> Self {
         Bitboard(!self.0)
     }
 }
 
-impl BitAndAssign for Bitboard {
-    #[inline(always)]
-    fn bitand_assign(&mut self, rhs: Bitboard) {
-        self.0 &= rhs.0;
-    }
-}
-
-impl BitOrAssign for Bitboard {
-    #[inline(always)]
-    fn bitor_assign(&mut self, rhs: Bitboard) {
-        self.0 |= rhs.0;
-    }
-}
-
-impl BitXorAssign for Bitboard {
-    #[inline(always)]
-    fn bitxor_assign(&mut self, rhs: Bitboard) {
-        self.0 ^= rhs.0;
-    }
-}
-
-// ---- operators between Bitboard and u64 ----
-
-impl BitAnd<u64> for Bitboard {
-    type Output = Bitboard;
-    #[inline(always)]
-    fn bitand(self, rhs: u64) -> Bitboard {
-        Bitboard(self.0 & rhs)
-    }
-}
-
-impl BitOr<u64> for Bitboard {
-    type Output = Bitboard;
-    #[inline(always)]
-    fn bitor(self, rhs: u64) -> Bitboard {
-        Bitboard(self.0 | rhs)
-    }
-}
-
-impl BitXor<u64> for Bitboard {
-    type Output = Bitboard;
-    #[inline(always)]
-    fn bitxor(self, rhs: u64) -> Bitboard {
-        Bitboard(self.0 ^ rhs)
-    }
-}
-
-impl BitAnd<Bitboard> for u64 {
-    type Output = Bitboard;
-    #[inline(always)]
-    fn bitand(self, rhs: Bitboard) -> Bitboard {
-        Bitboard(self & rhs.0)
-    }
-}
-
-impl BitOr<Bitboard> for u64 {
-    type Output = Bitboard;
-    #[inline(always)]
-    fn bitor(self, rhs: Bitboard) -> Bitboard {
-        Bitboard(self | rhs.0)
-    }
-}
-
 impl Shl<u64> for Bitboard {
-    type Output = Bitboard;
+    type Output = Self;
     #[inline(always)]
-    fn shl(self, rhs: u64) -> Bitboard {
+    fn shl(self, rhs: u64) -> Self {
         Bitboard(self.0 << rhs)
     }
 }
 
 impl Shr<u64> for Bitboard {
-    type Output = Bitboard;
+    type Output = Self;
     #[inline(always)]
-    fn shr(self, rhs: u64) -> Bitboard {
+    fn shr(self, rhs: u64) -> Self {
         Bitboard(self.0 >> rhs)
+    }
+}
+
+impl From<Bitboard> for bool {
+    #[inline(always)]
+    fn from(b: Bitboard) -> bool {
+        b.0 != 0
     }
 }
 
@@ -234,15 +157,17 @@ impl PartialEq<u64> for Bitboard {
     }
 }
 
-// ---- Display: show the board as 8 rows of 8 bits ----
+// ---- display ----
 
 impl fmt::Display for Bitboard {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let b = self.0;
         for rank in (0..8).rev() {
             for file in 0..8 {
-                let sq = rank * 8 + file;
-                let c = if b & (1u64 << sq) != 0 { '1' } else { '0' };
+                let c = if self.0 & (1u64 << (rank * 8 + file)) != 0 {
+                    '1'
+                } else {
+                    '0'
+                };
                 write!(f, "{}", c)?;
             }
             writeln!(f)?;
@@ -264,222 +189,60 @@ mod tests {
 
     #[test]
     fn lsb() {
-        let b = Bitboard(0x0000000000000001u64);
-        assert_eq!(b.lsb(), 0);
-
-        let b = Bitboard(0x0000000000000002u64);
-        assert_eq!(b.lsb(), 1);
-
-        let b = Bitboard(0x0000000000000004u64);
-        assert_eq!(b.lsb(), 2);
+        assert_eq!(Bitboard(0x1).lsb(), 0);
+        assert_eq!(Bitboard(0x2).lsb(), 1);
+        assert_eq!(Bitboard(0x4).lsb(), 2);
     }
 
     #[test]
     fn msb() {
-        let b = Bitboard(0x8000000000000000u64);
-        assert_eq!(b.msb(), 63);
-
-        let b = Bitboard(0x4000000000000000u64);
-        assert_eq!(b.msb(), 62);
-
-        let b = Bitboard(0x2000000000000000u64);
-        assert_eq!(b.msb(), 61);
+        assert_eq!(Bitboard(0x8000000000000000).msb(), 63);
+        assert_eq!(Bitboard(0x4000000000000000).msb(), 62);
+        assert_eq!(Bitboard(0x2000000000000000).msb(), 61);
     }
 
     #[test]
     fn popcount() {
-        let b = Bitboard(0x0000000000000001u64);
-        assert_eq!(b.count(), 1);
-
-        let b = Bitboard(0x0000000000000003u64);
-        assert_eq!(b.count(), 2);
-
-        let b = Bitboard(0x0000000000000007u64);
-        assert_eq!(b.count(), 3);
+        assert_eq!(Bitboard(0x1).count(), 1);
+        assert_eq!(Bitboard(0x3).count(), 2);
+        assert_eq!(Bitboard(0x7).count(), 3);
     }
 
     #[test]
     fn pop() {
-        let mut b = Bitboard(0x0000000000000001u64);
+        let mut b = Bitboard(0x1);
         assert_eq!(b.pop(), 0);
         assert_eq!(b, 0u64);
 
-        let mut b = Bitboard(0x0000000000000003u64);
+        let mut b = Bitboard(0x3);
         assert_eq!(b.pop(), 0);
-        assert_eq!(b, 0x0000000000000002u64);
+        assert_eq!(b, 0x2u64);
 
-        let mut b = Bitboard(0x0000000000000007u64);
+        let mut b = Bitboard(0x7);
         assert_eq!(b.pop(), 0);
-        assert_eq!(b, 0x0000000000000006u64);
-    }
-
-    #[test]
-    fn get_bits() {
-        assert_eq!(
-            Bitboard(0x0000000000000001u64).get_bits(),
-            0x0000000000000001u64
-        );
-        assert_eq!(
-            Bitboard(0x0000000000000003u64).get_bits(),
-            0x0000000000000003u64
-        );
-        assert_eq!(
-            Bitboard(0x0000000000000007u64).get_bits(),
-            0x0000000000000007u64
-        );
+        assert_eq!(b, 0x6u64);
     }
 
     #[test]
     fn empty() {
-        let b = Bitboard(0x0000000000000000u64);
-        assert!(b.is_empty());
-
-        let b = Bitboard(0x0000000000000001u64);
-        assert!(!b.is_empty());
-
-        let b = Bitboard(0x0000000000000003u64);
-        assert!(!b.is_empty());
-    }
-
-    #[test]
-    fn op_eq() {
-        assert_eq!(Bitboard(0u64), 0u64);
-        assert_eq!(Bitboard(0x0000000000000001u64), 0x0000000000000001u64);
-        assert_eq!(Bitboard(0x0000000000000003u64), 0x0000000000000003u64);
-    }
-
-    #[test]
-    fn op_ne() {
-        assert_ne!(Bitboard(0u64), 0x0000000000000001u64);
-        assert_ne!(Bitboard(0x0000000000000001u64), 0x0000000000000002u64);
-        assert_ne!(Bitboard(0x0000000000000003u64), 0x0000000000000004u64);
-    }
-
-    #[test]
-    fn op_and() {
-        assert_eq!((Bitboard(0u64) & 0u64), 0u64);
-        assert_eq!(
-            (Bitboard(0x0000000000000001u64) & 0x0000000000000001u64),
-            0x0000000000000001u64
-        );
-        assert_eq!(
-            (Bitboard(0x0000000000000003u64) & 0x0000000000000003u64),
-            0x0000000000000003u64
-        );
-    }
-
-    #[test]
-    fn op_or() {
-        assert_eq!((Bitboard(0u64) | 0u64), 0u64);
-        assert_eq!(
-            (Bitboard(0x0000000000000001u64) | 0x0000000000000001u64),
-            0x0000000000000001u64
-        );
-        assert_eq!(
-            (Bitboard(0x0000000000000003u64) | 0x0000000000000003u64),
-            0x0000000000000003u64
-        );
-    }
-
-    #[test]
-    fn op_xor() {
-        assert_eq!((Bitboard(0u64) ^ 0u64), 0u64);
-        assert_eq!(
-            (Bitboard(0x0000000000000001u64) ^ 0x0000000000000001u64),
-            0u64
-        );
-        assert_eq!(
-            (Bitboard(0x0000000000000003u64) ^ 0x0000000000000003u64),
-            0u64
-        );
-    }
-
-    #[test]
-    fn op_shl() {
-        assert_eq!((Bitboard(0u64) << 0u64), 0u64);
-        assert_eq!(
-            (Bitboard(0x0000000000000001u64) << 1u64),
-            0x0000000000000002u64
-        );
-        assert_eq!(
-            (Bitboard(0x0000000000000003u64) << 2u64),
-            0x000000000000000cu64
-        );
-    }
-
-    #[test]
-    fn op_shr() {
-        assert_eq!((Bitboard(0u64) >> 0u64), 0u64);
-        assert_eq!((Bitboard(0x0000000000000001u64) >> 1u64), 0u64);
-        assert_eq!((Bitboard(0x0000000000000003u64) >> 2u64), 0u64);
-    }
-
-    #[test]
-    fn op_and_assign() {
-        let mut b = Bitboard(0u64);
-        b &= Bitboard(0u64);
-        assert_eq!(b, 0u64);
-
-        let mut b = Bitboard(0x0000000000000001u64);
-        b &= Bitboard(0x0000000000000001u64);
-        assert_eq!(b, 0x0000000000000001u64);
-
-        let mut b = Bitboard(0x0000000000000003u64);
-        b &= Bitboard(0x0000000000000003u64);
-        assert_eq!(b, 0x0000000000000003u64);
-    }
-
-    #[test]
-    fn op_or_assign() {
-        let mut b = Bitboard(0u64);
-        b |= Bitboard(0u64);
-        assert_eq!(b, 0u64);
-
-        let mut b = Bitboard(0x0000000000000001u64);
-        b |= Bitboard(0x0000000000000001u64);
-        assert_eq!(b, 0x0000000000000001u64);
-
-        let mut b = Bitboard(0x0000000000000003u64);
-        b |= Bitboard(0x0000000000000003u64);
-        assert_eq!(b, 0x0000000000000003u64);
-    }
-
-    #[test]
-    fn op_xor_assign() {
-        let mut b = Bitboard(0u64);
-        b ^= Bitboard(0u64);
-        assert_eq!(b, 0u64);
-
-        let mut b = Bitboard(0x0000000000000001u64);
-        b ^= Bitboard(0x0000000000000001u64);
-        assert_eq!(b, 0u64);
-
-        let mut b = Bitboard(0x0000000000000003u64);
-        b ^= Bitboard(0x0000000000000003u64);
-        assert_eq!(b, 0u64);
-    }
-
-    #[test]
-    fn op_not() {
-        assert_eq!(!Bitboard(0u64), 0xffffffffffffffffu64);
-        assert_eq!(!Bitboard(0x0000000000000001u64), 0xfffffffffffffffeu64);
-        assert_eq!(!Bitboard(0x0000000000000003u64), 0xfffffffffffffffcu64);
+        assert!(Bitboard(0).is_empty());
+        assert!(!Bitboard(1).is_empty());
     }
 
     #[test]
     fn set_bit() {
-        let mut b = Bitboard(0u64);
+        let mut b = Bitboard(0);
         b.set(0);
-        assert_eq!(b, 0x0000000000000001u64);
+        assert_eq!(b, 0x1u64);
         b.set(1);
-        assert_eq!(b, 0x0000000000000003u64);
+        assert_eq!(b, 0x3u64);
         b.set(2);
-        assert_eq!(b, 0x0000000000000007u64);
+        assert_eq!(b, 0x7u64);
     }
 
     #[test]
     fn check_bit() {
-        let mut b = Bitboard(0u64);
+        let mut b = Bitboard(0);
         assert!(!b.check(0));
         b.set(0);
         assert!(b.check(0));
@@ -489,14 +252,10 @@ mod tests {
 
     #[test]
     fn clear_bit() {
-        let mut b = Bitboard(0u64);
-        b.clear_bit(0);
-        assert_eq!(b, 0u64);
-
+        let mut b = Bitboard(0);
         b.set(0);
         b.clear_bit(0);
         assert_eq!(b, 0u64);
-
         b.set(1);
         b.clear_bit(1);
         assert_eq!(b, 0u64);
@@ -504,35 +263,40 @@ mod tests {
 
     #[test]
     fn clear_all() {
-        let mut b = Bitboard(0u64);
-        b.clear();
-        assert_eq!(b, 0u64);
-
+        let mut b = Bitboard(0);
         b.set(0);
-        b.clear();
-        assert_eq!(b, 0u64);
-
-        b.set(1);
         b.clear();
         assert_eq!(b, 0u64);
     }
 
     #[test]
-    fn from_square_index() {
-        let b = Bitboard::from_index(0);
-        assert_eq!(b, 0x0000000000000001u64);
+    fn from_index() {
+        assert_eq!(Bitboard::from_index(0), 0x1u64);
+        assert_eq!(Bitboard::from_index(1), 0x2u64);
+        assert_eq!(Bitboard::from_index(2), 0x4u64);
+    }
 
-        let b = Bitboard::from_index(1);
-        assert_eq!(b, 0x0000000000000002u64);
+    #[test]
+    fn ops() {
+        assert_eq!(Bitboard(0x3) & Bitboard(0x1), 0x1u64);
+        assert_eq!(Bitboard(0x1) | Bitboard(0x2), 0x3u64);
+        assert_eq!(Bitboard(0x3) ^ Bitboard(0x3), 0u64);
+        assert_eq!(!Bitboard(0), 0xffffffffffffffffu64);
+        assert_eq!(Bitboard(0x1) << 1u64, 0x2u64);
+        assert_eq!(Bitboard(0x2) >> 1u64, 0x1u64);
 
-        let b = Bitboard::from_index(2);
-        assert_eq!(b, 0x0000000000000004u64);
+        let mut b = Bitboard(0x3);
+        b &= Bitboard(0x1);
+        assert_eq!(b, 0x1u64);
+        b |= Bitboard(0x2);
+        assert_eq!(b, 0x3u64);
+        b ^= Bitboard(0x3);
+        assert_eq!(b, 0u64);
     }
 
     #[test]
     fn display_bitboard() {
-        let b = Bitboard::from_square(Square::SQ_A1);
-        let s = format!("{}", b);
+        let s = format!("{}", Bitboard::from_square(Square::SQ_A1));
         assert!(s.ends_with("10000000\n"));
     }
 }

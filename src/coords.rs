@@ -207,6 +207,12 @@ impl std::ops::Sub<Rank> for Rank {
 // Square
 // ---------------------------------------------------------------------------
 
+macro_rules! define_squares {
+    ($($name:ident = $val:expr),* $(,)?) => {
+        $(pub const $name: Square = Square($val);)*
+    };
+}
+
 /// A chess square encoded as file + rank*8 (A1=0, B1=1, … H8=63), NO_SQ=64.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Square(pub u8);
@@ -214,71 +220,16 @@ pub struct Square(pub u8);
 impl Square {
     pub const NO_SQ: Square = Square(64);
 
-    // Named constants for all 64 squares
-    pub const SQ_A1: Square = Square(0);
-    pub const SQ_B1: Square = Square(1);
-    pub const SQ_C1: Square = Square(2);
-    pub const SQ_D1: Square = Square(3);
-    pub const SQ_E1: Square = Square(4);
-    pub const SQ_F1: Square = Square(5);
-    pub const SQ_G1: Square = Square(6);
-    pub const SQ_H1: Square = Square(7);
-    pub const SQ_A2: Square = Square(8);
-    pub const SQ_B2: Square = Square(9);
-    pub const SQ_C2: Square = Square(10);
-    pub const SQ_D2: Square = Square(11);
-    pub const SQ_E2: Square = Square(12);
-    pub const SQ_F2: Square = Square(13);
-    pub const SQ_G2: Square = Square(14);
-    pub const SQ_H2: Square = Square(15);
-    pub const SQ_A3: Square = Square(16);
-    pub const SQ_B3: Square = Square(17);
-    pub const SQ_C3: Square = Square(18);
-    pub const SQ_D3: Square = Square(19);
-    pub const SQ_E3: Square = Square(20);
-    pub const SQ_F3: Square = Square(21);
-    pub const SQ_G3: Square = Square(22);
-    pub const SQ_H3: Square = Square(23);
-    pub const SQ_A4: Square = Square(24);
-    pub const SQ_B4: Square = Square(25);
-    pub const SQ_C4: Square = Square(26);
-    pub const SQ_D4: Square = Square(27);
-    pub const SQ_E4: Square = Square(28);
-    pub const SQ_F4: Square = Square(29);
-    pub const SQ_G4: Square = Square(30);
-    pub const SQ_H4: Square = Square(31);
-    pub const SQ_A5: Square = Square(32);
-    pub const SQ_B5: Square = Square(33);
-    pub const SQ_C5: Square = Square(34);
-    pub const SQ_D5: Square = Square(35);
-    pub const SQ_E5: Square = Square(36);
-    pub const SQ_F5: Square = Square(37);
-    pub const SQ_G5: Square = Square(38);
-    pub const SQ_H5: Square = Square(39);
-    pub const SQ_A6: Square = Square(40);
-    pub const SQ_B6: Square = Square(41);
-    pub const SQ_C6: Square = Square(42);
-    pub const SQ_D6: Square = Square(43);
-    pub const SQ_E6: Square = Square(44);
-    pub const SQ_F6: Square = Square(45);
-    pub const SQ_G6: Square = Square(46);
-    pub const SQ_H6: Square = Square(47);
-    pub const SQ_A7: Square = Square(48);
-    pub const SQ_B7: Square = Square(49);
-    pub const SQ_C7: Square = Square(50);
-    pub const SQ_D7: Square = Square(51);
-    pub const SQ_E7: Square = Square(52);
-    pub const SQ_F7: Square = Square(53);
-    pub const SQ_G7: Square = Square(54);
-    pub const SQ_H7: Square = Square(55);
-    pub const SQ_A8: Square = Square(56);
-    pub const SQ_B8: Square = Square(57);
-    pub const SQ_C8: Square = Square(58);
-    pub const SQ_D8: Square = Square(59);
-    pub const SQ_E8: Square = Square(60);
-    pub const SQ_F8: Square = Square(61);
-    pub const SQ_G8: Square = Square(62);
-    pub const SQ_H8: Square = Square(63);
+    define_squares! {
+        SQ_A1=0,  SQ_B1=1,  SQ_C1=2,  SQ_D1=3,  SQ_E1=4,  SQ_F1=5,  SQ_G1=6,  SQ_H1=7,
+        SQ_A2=8,  SQ_B2=9,  SQ_C2=10, SQ_D2=11, SQ_E2=12, SQ_F2=13, SQ_G2=14, SQ_H2=15,
+        SQ_A3=16, SQ_B3=17, SQ_C3=18, SQ_D3=19, SQ_E3=20, SQ_F3=21, SQ_G3=22, SQ_H3=23,
+        SQ_A4=24, SQ_B4=25, SQ_C4=26, SQ_D4=27, SQ_E4=28, SQ_F4=29, SQ_G4=30, SQ_H4=31,
+        SQ_A5=32, SQ_B5=33, SQ_C5=34, SQ_D5=35, SQ_E5=36, SQ_F5=37, SQ_G5=38, SQ_H5=39,
+        SQ_A6=40, SQ_B6=41, SQ_C6=42, SQ_D6=43, SQ_E6=44, SQ_F6=45, SQ_G6=46, SQ_H6=47,
+        SQ_A7=48, SQ_B7=49, SQ_C7=50, SQ_D7=51, SQ_E7=52, SQ_F7=53, SQ_G7=54, SQ_H7=55,
+        SQ_A8=56, SQ_B8=57, SQ_C8=58, SQ_D8=59, SQ_E8=60, SQ_F8=61, SQ_G8=62, SQ_H8=63,
+    }
 
     #[inline]
     pub fn new(file: File, rank: Rank) -> Square {
