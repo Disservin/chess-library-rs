@@ -854,6 +854,9 @@ mod tests {
     fn test_single_game_moves() {
         let pgn = b"[Event \"X\"]\n\n1. e4 e5 2. Nf3 Nc6 *\n";
         let r = parse(pgn);
+        // header should be present
+        assert_eq!(r.games[0].headers.len(), 1);
+        assert_eq!(r.games[0].headers[0], ("Event".into(), "X".into()));
         let moves: Vec<&str> = r.games[0].moves.iter().map(|(m, _)| m.as_str()).collect();
         assert_eq!(moves, vec!["e4", "e5", "Nf3", "Nc6"]);
     }
@@ -862,6 +865,7 @@ mod tests {
     fn test_move_with_comment() {
         let pgn = b"[Event \"X\"]\n\n1. e4 { good move } e5 *\n";
         let r = parse(pgn);
+        assert_eq!(r.games[0].headers[0], ("Event".into(), "X".into()));
         assert_eq!(r.games[0].moves[0].0, "e4");
         assert_eq!(r.games[0].moves[0].1, " good move ");
     }
@@ -873,6 +877,7 @@ mod tests {
         assert_eq!(r.games.len(), 1);
         let moves: Vec<&str> = r.games[0].moves.iter().map(|(m, _)| m.as_str()).collect();
         assert_eq!(moves, vec!["e4", "e5"]);
+        assert_eq!(r.games[0].headers[0], ("Event".into(), "X".into()));
     }
 
     #[test]
@@ -880,6 +885,7 @@ mod tests {
         let pgn = b"[Event \"X\"]\n\n1. e4 e5 0-1\n";
         let r = parse(pgn);
         assert_eq!(r.games.len(), 1);
+        assert_eq!(r.games[0].headers[0], ("Event".into(), "X".into()));
     }
 
     #[test]
@@ -889,6 +895,7 @@ mod tests {
         assert_eq!(r.games.len(), 1);
         let moves: Vec<&str> = r.games[0].moves.iter().map(|(m, _)| m.as_str()).collect();
         assert_eq!(moves, vec!["e4", "e5"]);
+        assert_eq!(r.games[0].headers[0], ("Event".into(), "X".into()));
     }
 
     #[test]
@@ -898,6 +905,8 @@ mod tests {
         assert_eq!(r.games.len(), 2);
         assert_eq!(r.games[0].moves[0].0, "d4");
         assert_eq!(r.games[1].moves[0].0, "e4");
+        assert_eq!(r.games[0].headers[0], ("Event".into(), "A".into()));
+        assert_eq!(r.games[1].headers[0], ("Event".into(), "B".into()));
     }
 
     #[test]
@@ -906,6 +915,7 @@ mod tests {
         let r = parse(pgn);
         let moves: Vec<&str> = r.games[0].moves.iter().map(|(m, _)| m.as_str()).collect();
         assert_eq!(moves, vec!["e4", "e5"]);
+        assert_eq!(r.games[0].headers[0], ("Event".into(), "X".into()));
     }
 
     #[test]
@@ -914,6 +924,7 @@ mod tests {
         let r = parse(pgn);
         let moves: Vec<&str> = r.games[0].moves.iter().map(|(m, _)| m.as_str()).collect();
         assert_eq!(moves, vec!["e4", "e5"]);
+        assert_eq!(r.games[0].headers[0], ("Event".into(), "X".into()));
     }
 
     #[test]
@@ -922,6 +933,7 @@ mod tests {
         let r = parse(pgn);
         let moves: Vec<&str> = r.games[0].moves.iter().map(|(m, _)| m.as_str()).collect();
         assert!(moves.contains(&"0-0"));
+        assert_eq!(r.games[0].headers[0], ("Event".into(), "X".into()));
     }
 
     #[test]
@@ -1217,6 +1229,80 @@ mod tests {
         );
         assert_eq!(vis.games.len(), 1);
         assert!(vis.games[0].headers.is_empty());
+    }
+
+    #[test]
+    fn test_empty_input_not_enough_data() {
+        use std::io::Cursor;
+        let data: Vec<u8> = vec![];
+        let mut cursor = Cursor::new(data);
+        let mut vis = Recorder::default();
+        let err = StreamParser::new(&mut cursor).read_games(&mut vis);
+        assert_eq!(
+            err,
+            Err(StreamParserError(StreamParserErrorCode::NotEnoughData))
+        );
+    }
+
+    #[test]
+    fn test_exceeded_max_string_length_key() {
+        use std::io::Cursor;
+        // Create a header key longer than STRING_BUFFER_SIZE (255)
+        let long_key = "A".repeat(260);
+        let pgn = format!("[{} \"v\"]\n\n*\n", long_key);
+        let mut cursor = Cursor::new(pgn.into_bytes());
+        let mut vis = Recorder::default();
+        let err = StreamParser::new(&mut cursor).read_games(&mut vis);
+        assert_eq!(
+            err,
+            Err(StreamParserError(
+                StreamParserErrorCode::ExceededMaxStringLength
+            ))
+        );
+    }
+
+    #[test]
+    fn test_exceeded_max_string_length_value() {
+        use std::io::Cursor;
+        // Create a header value longer than STRING_BUFFER_SIZE (255)
+        let long_val = "B".repeat(260);
+        let pgn = format!("[Event \"{}\"]\n\n*\n", long_val);
+        let mut cursor = Cursor::new(pgn.into_bytes());
+        let mut vis = Recorder::default();
+        let err = StreamParser::new(&mut cursor).read_games(&mut vis);
+        assert_eq!(
+            err,
+            Err(StreamParserError(
+                StreamParserErrorCode::ExceededMaxStringLength
+            ))
+        );
+    }
+
+    #[test]
+    fn test_error_message_and_none_has_error() {
+        let none = StreamParserError::none();
+        assert!(!none.has_error());
+        assert_eq!(none.message(), "No error");
+
+        let e = StreamParserError(StreamParserErrorCode::ExceededMaxStringLength);
+        assert!(e.has_error());
+        assert_eq!(e.message(), "Exceeded max string length");
+    }
+
+    #[test]
+    fn test_default_skip_is_false() {
+        struct MinimalVis;
+        impl Visitor for MinimalVis {
+            fn start_pgn(&mut self) {}
+            fn header(&mut self, _: &str, _: &str) {}
+            fn start_moves(&mut self) {}
+            fn move_token(&mut self, _: &str, _: &str) {}
+            fn end_pgn(&mut self) {}
+        }
+
+        let mut v = MinimalVis;
+        // default skip should be false
+        assert!(!v.skip());
     }
 
     #[test]
