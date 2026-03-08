@@ -5,23 +5,18 @@ use std::time::Instant;
 
 use chess_library_rs::pgn::{StreamParser, StreamParserError, Visitor};
 
-use std::fs::File;
-
 struct CountVisitor {
     games: usize,
     headers: usize,
     moves: usize,
-    curr_header: Option<String>,
 }
 
 impl CountVisitor {
-    fn new(path: &str) -> Self {
-        let file = File::create(path).expect("failed to create file");
+    fn new() -> Self {
         CountVisitor {
             games: 0,
             headers: 0,
             moves: 0,
-            curr_header: None,
         }
     }
 }
@@ -33,9 +28,6 @@ impl Visitor for CountVisitor {
 
     fn header(&mut self, _key: &str, _value: &str) {
         self.headers += 1;
-        if _key == "Site" {
-            self.curr_header = Some(_value.to_string());
-        }
     }
 
     fn start_moves(&mut self) {}
@@ -195,7 +187,7 @@ fn main() {
 
     for i in 0..iters {
         let mut cursor = Cursor::new(&data);
-        let mut vis = CountVisitor::new(&format!("moves_iter{}.txt", i + 1));
+        let mut vis = CountVisitor::new();
         let t0 = Instant::now();
         let res: Result<(), StreamParserError> =
             StreamParser::new(&mut cursor).read_games(&mut vis);

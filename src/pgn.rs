@@ -1,5 +1,7 @@
 use std::io::Read;
 
+use memchr::{memchr, memchr3};
+
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const DEFAULT_CHUNK: usize = 8192 * 4;
@@ -108,19 +110,6 @@ impl<R: Read> Reader<R> {
         Some(b)
     }
 
-    /// Whether the byte immediately after the current one (best-effort,
-    /// may return `None` at chunk boundaries) is an ASCII digit.
-    fn next_is_digit(&mut self) -> bool {
-        let mut p = self.pos + 1;
-        while p < self.len {
-            if self.buf[p] != b'\r' {
-                return self.buf[p].is_ascii_digit();
-            }
-            p += 1;
-        }
-        false
-    }
-
     fn skip_while(&mut self, pred: impl Fn(u8) -> bool) {
         while let Some(b) = self.peek() {
             if pred(b) {
@@ -135,35 +124,116 @@ impl<R: Read> Reader<R> {
 
     /// Drain text of `{ … }` into `out`. Called after the opening `{`.
     fn drain_comment(&mut self, out: &mut String) {
-        while let Some(b) = self.next() {
-            if b == b'}' {
-                return;
+        loop {
+            let slice = &self.buf[self.pos..self.len];
+            match memchr(b'}', slice) {
+                Some(i) => {
+                    for &b in &slice[..i] {
+                        if b != b'\r' {
+                            out.push(b as char);
+                        }
+                    }
+                    self.pos += i + 1;
+                    return;
+                }
+                None => {
+                    for &b in slice {
+                        if b != b'\r' {
+                            out.push(b as char);
+                        }
+                    }
+                    self.pos = self.len;
+                    if !self.refill() {
+                        return;
+                    }
+                }
             }
-            out.push(b as char);
         }
     }
 
     /// Skip `( … )` variation with nesting and embedded `{ }`. Called after `(`.
     fn skip_variation(&mut self) {
         let mut depth = 1usize;
-        while let Some(b) = self.next() {
-            match b {
-                b'(' => depth += 1,
-                b')' => {
-                    depth -= 1;
-                    if depth == 0 {
+        loop {
+            let slice = &self.buf[self.pos..self.len];
+            match memchr3(b'(', b')', b'{', slice) {
+                Some(i) => {
+                    let b = slice[i];
+                    self.pos += i + 1;
+                    match b {
+                        b'(' => depth += 1,
+                        b')' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                return;
+                            }
+                        }
+                        // skip embedded { comment }
+                        _ => loop {
+                            let inner = &self.buf[self.pos..self.len];
+                            match memchr(b'}', inner) {
+                                Some(j) => {
+                                    self.pos += j + 1;
+                                    break;
+                                }
+                                None => {
+                                    self.pos = self.len;
+                                    if !self.refill() {
+                                        return;
+                                    }
+                                }
+                            }
+                        },
+                    }
+                }
+                None => {
+                    self.pos = self.len;
+                    if !self.refill() {
                         return;
                     }
                 }
-                // comments inside variations must not confuse paren counting
-                b'{' => {
-                    while let Some(k) = self.next() {
-                        if k == b'}' {
-                            break;
-                        }
+            }
+        }
+    }
+
+    /// Skip to (but not past) the next `\n`. Uses `memchr` for bulk scanning.
+    fn skip_to_newline(&mut self) {
+        loop {
+            let slice = &self.buf[self.pos..self.len];
+            match memchr(b'\n', slice) {
+                Some(i) => {
+                    self.pos += i;
+                    return;
+                }
+                None => {
+                    self.pos = self.len;
+                    if !self.refill() {
+                        return;
                     }
                 }
-                _ => {}
+            }
+        }
+    }
+
+    /// Advance `pos` to the next `[` in the stream. Returns `false` on EOF.
+    fn skip_to_open_bracket(&mut self) -> bool {
+        // `bump()` may have advanced pos past len; normalize before raw buffer access.
+        if self.pos > self.len {
+            self.pos = self.len;
+        }
+        loop {
+            let slice = &self.buf[self.pos..self.len];
+            match memchr(b'[', slice) {
+                Some(i) => {
+                    self.pos += i;
+                    return true;
+                }
+                None => {
+                    self.pos = self.len;
+                    if !self.refill() {
+                        return false;
+                    }
+                }
             }
         }
     }
@@ -277,14 +347,8 @@ impl<R: Read> StreamParser<R> {
 
         loop {
             // Advance to the opening '[' of the next game.
-            loop {
-                match self.reader.peek() {
-                    None => return Ok(()),
-                    Some(b'[') => break,
-                    _ => {
-                        self.reader.bump();
-                    }
-                }
+            if !self.reader.skip_to_open_bracket() {
+                return Ok(());
             }
 
             vis.skip_pgn(false);
@@ -343,7 +407,7 @@ impl<R: Read> StreamParser<R> {
 
             // Opening quote
             if self.reader.peek() != Some(b'"') {
-                self.reader.skip_while(|b| b != b'\n');
+                self.reader.skip_to_newline();
                 key.clear();
                 val.clear();
                 continue;
@@ -391,7 +455,7 @@ impl<R: Read> StreamParser<R> {
             val.clear();
 
             // Skip remainder of the tag line
-            self.reader.skip_while(|b| b != b'\n');
+            self.reader.skip_to_newline();
             if self.reader.peek() == Some(b'\n') {
                 self.reader.bump();
             }
@@ -1101,7 +1165,7 @@ mod tests {
             fn end_pgn(&mut self) {}
         }
 
-        let mut v = MinimalVis;
+        let v = MinimalVis;
         // default skip should be false
         assert!(!v.skip());
     }
