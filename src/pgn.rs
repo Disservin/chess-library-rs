@@ -2,7 +2,7 @@ use std::io::Read;
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const CHUNK: usize = 8192;
+const DEFAULT_CHUNK: usize = 8192 * 4;
 const MAX_TOKEN: usize = 255;
 
 // ─── TokenBuf ────────────────────────────────────────────────────────────────
@@ -46,16 +46,18 @@ impl TokenBuf {
 
 struct Reader<R: Read> {
     inner: R,
-    buf: Box<[u8; CHUNK]>,
+    buf: Vec<u8>,
     pos: usize,
     len: usize,
 }
 
 impl<R: Read> Reader<R> {
-    fn new(inner: R) -> Self {
+    fn new(inner: R, chunk_size: usize) -> Self {
+        assert!(chunk_size > 0, "chunk size must be greater than zero");
+
         Self {
             inner,
-            buf: Box::new([0; CHUNK]),
+            buf: vec![0; chunk_size],
             pos: 0,
             len: 0,
         }
@@ -257,7 +259,13 @@ pub struct StreamParser<R: Read> {
 impl<R: Read> StreamParser<R> {
     pub fn new(reader: R) -> Self {
         Self {
-            reader: Reader::new(reader),
+            reader: Reader::new(reader, DEFAULT_CHUNK),
+        }
+    }
+
+    pub fn with_chunk_size(reader: R, chunk_size: usize) -> Self {
+        Self {
+            reader: Reader::new(reader, chunk_size),
         }
     }
 
@@ -621,7 +629,7 @@ mod tests {
         let mut cursor = Cursor::new(pgn);
         let mut vis = Recorder::default();
 
-        StreamParser::<_, 1>::new(&mut cursor)
+        StreamParser::with_chunk_size(&mut cursor, 1)
             .read_games(&mut vis)
             .unwrap();
         vis
