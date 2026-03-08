@@ -1,156 +1,178 @@
 use std::io::Read;
 
-// ---------------------------------------------------------------------------
-// StringBuffer — fixed 255-byte token accumulator
-// ---------------------------------------------------------------------------
+// ─── Constants ───────────────────────────────────────────────────────────────
 
-const STRING_BUFFER_SIZE: usize = 255;
+const CHUNK: usize = 8192;
+const MAX_TOKEN: usize = 255;
 
-struct StringBuffer {
-    buf: [u8; STRING_BUFFER_SIZE],
+// ─── TokenBuf ────────────────────────────────────────────────────────────────
+
+struct TokenBuf {
+    data: [u8; MAX_TOKEN],
     len: usize,
 }
 
-impl StringBuffer {
+impl TokenBuf {
     fn new() -> Self {
-        StringBuffer {
-            buf: [0u8; STRING_BUFFER_SIZE],
+        Self {
+            data: [0; MAX_TOKEN],
+            len: 0,
+        }
+    }
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+    fn clear(&mut self) {
+        self.len = 0;
+    }
+    fn push(&mut self, b: u8) -> bool {
+        if self.len < MAX_TOKEN {
+            self.data[self.len] = b;
+            self.len += 1;
+            true
+        } else {
+            false
+        }
+    }
+    fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.data[..self.len]).unwrap_or("")
+    }
+}
+
+// ─── Reader ───────────────────────────────────────────────────────────────────
+//
+// Buffered byte source with a clean peek/bump/next interface.
+// Transparently discards `\r` bytes so the rest of the parser is CRLF-agnostic.
+
+struct Reader<R: Read> {
+    inner: R,
+    buf: Box<[u8; CHUNK]>,
+    pos: usize,
+    len: usize,
+}
+
+impl<R: Read> Reader<R> {
+    fn new(inner: R) -> Self {
+        Self {
+            inner,
+            buf: Box::new([0; CHUNK]),
+            pos: 0,
             len: 0,
         }
     }
 
-    fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    fn clear(&mut self) {
-        self.len = 0;
-    }
-
-    fn add(&mut self, c: u8) -> bool {
-        if self.len >= STRING_BUFFER_SIZE {
-            return false;
-        }
-        self.buf[self.len] = c;
-        self.len += 1;
-        true
-    }
-
-    fn get(&self) -> &str {
-        // SAFETY: PGN tokens are ASCII
-        std::str::from_utf8(&self.buf[..self.len]).unwrap_or("")
-    }
-}
-
-// ---------------------------------------------------------------------------
-// StreamBuffer — buffered reader with character-at-a-time interface
-// ---------------------------------------------------------------------------
-
-const CHUNK: usize = 4096;
-
-struct StreamBuffer<R: Read> {
-    reader: R,
-    buf: Vec<u8>,
-    pos: usize,
-    filled: usize,
-}
-
-impl<R: Read> StreamBuffer<R> {
-    fn new(reader: R) -> Self {
-        StreamBuffer {
-            reader,
-            buf: vec![0u8; CHUNK],
-            pos: 0,
-            filled: 0,
-        }
-    }
-
-    fn fill(&mut self) -> bool {
+    fn refill(&mut self) -> bool {
         self.pos = 0;
-        match self.reader.read(&mut self.buf) {
+        match self.inner.read(self.buf.as_mut()) {
             Ok(n) if n > 0 => {
-                self.filled = n;
+                self.len = n;
                 true
             }
             _ => {
-                self.filled = 0;
+                self.len = 0;
                 false
             }
         }
     }
 
-    /// Return the current character, skipping carriage returns.
-    fn some(&mut self) -> Option<u8> {
+    /// Current byte, skipping `\r`. Returns `None` at EOF.
+    fn peek(&mut self) -> Option<u8> {
         loop {
-            if self.pos < self.filled {
-                let c = self.buf[self.pos];
-                if c == b'\r' {
+            if self.pos < self.len {
+                let b = self.buf[self.pos];
+                if b == b'\r' {
                     self.pos += 1;
                     continue;
                 }
-                return Some(c);
+                return Some(b);
             }
-            if !self.fill() {
+            if !self.refill() {
                 return None;
             }
         }
     }
 
-    fn advance(&mut self) {
-        if self.pos >= self.filled {
-            self.fill();
-        }
+    /// Advance past the current byte (always call `peek` first).
+    #[inline]
+    fn bump(&mut self) {
         self.pos += 1;
     }
 
-    fn current(&mut self) -> Option<u8> {
-        if self.pos >= self.filled {
-            if !self.fill() {
-                return None;
-            }
-        }
-        Some(self.buf[self.pos])
+    /// `peek` + `bump`.
+    #[inline]
+    fn next(&mut self) -> Option<u8> {
+        let b = self.peek()?;
+        self.bump();
+        Some(b)
     }
 
-    fn peek(&mut self) -> Option<u8> {
-        let next = self.pos + 1;
-        if next < self.filled {
-            return Some(self.buf[next]);
+    /// Whether the byte immediately after the current one (best-effort,
+    /// may return `None` at chunk boundaries) is an ASCII digit.
+    fn next_is_digit(&mut self) -> bool {
+        let mut p = self.pos + 1;
+        while p < self.len {
+            if self.buf[p] != b'\r' {
+                return self.buf[p].is_ascii_digit();
+            }
+            p += 1;
         }
-        // Would need to peek across a buffer boundary — fill a new chunk
-        // In practice this is rare; just return None as a safe fallback
-        // which is acceptable for the termination symbol lookahead.
-        None
+        false
     }
 
-    /// Skip from the current character (which must be `open_delim`) until the
-    /// matching `close_delim`, handling nesting.  Returns `true` on success.
-    fn skip_until(&mut self, open_delim: u8, close_delim: u8) -> bool {
-        let mut stack = 0usize;
-        loop {
-            let c = match self.some() {
-                Some(c) => c,
-                None => return false,
-            };
-            self.advance();
-            if c == open_delim {
-                stack += 1;
-            } else if c == close_delim {
-                if stack == 0 {
-                    return false; // mismatched
-                }
-                stack -= 1;
-                if stack == 0 {
-                    return true;
-                }
+    fn skip_while(&mut self, pred: impl Fn(u8) -> bool) {
+        while let Some(b) = self.peek() {
+            if pred(b) {
+                self.bump();
+            } else {
+                break;
             }
         }
+    }
+
+    // ── Structural skippers ──────────────────────────────────────────────────
+
+    /// Drain text of `{ … }` into `out`. Called after the opening `{`.
+    fn drain_comment(&mut self, out: &mut String) {
+        while let Some(b) = self.next() {
+            if b == b'}' {
+                return;
+            }
+            out.push(b as char);
+        }
+    }
+
+    /// Skip `( … )` variation with nesting and embedded `{ }`. Called after `(`.
+    fn skip_variation(&mut self) {
+        let mut depth = 1usize;
+        while let Some(b) = self.next() {
+            match b {
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return;
+                    }
+                }
+                // comments inside variations must not confuse paren counting
+                b'{' => {
+                    while let Some(k) = self.next() {
+                        if k == b'}' {
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Skip `$NNN` NAG digits. Called after `$`.
+    fn skip_nag(&mut self) {
+        self.skip_while(|b| b.is_ascii_digit());
     }
 }
 
-// ---------------------------------------------------------------------------
-// Error type
-// ---------------------------------------------------------------------------
+// ─── Error ───────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamParserErrorCode {
@@ -191,16 +213,11 @@ impl std::fmt::Display for StreamParserError {
         write!(f, "{}", self.message())
     }
 }
-
 impl std::error::Error for StreamParserError {}
 
-// ---------------------------------------------------------------------------
-// Visitor trait
-// ---------------------------------------------------------------------------
+// ─── Visitor ─────────────────────────────────────────────────────────────────
 
 /// Callback-based interface for receiving PGN events.
-///
-/// Implement this trait to process games from a PGN stream.
 pub trait Visitor {
     /// Called when a new game begins (before the first header).
     fn start_pgn(&mut self);
@@ -211,570 +228,343 @@ pub trait Visitor {
     /// Called once all headers have been read and moves are about to start.
     fn start_moves(&mut self);
 
-    /// Called for each move token.  `comment` is the text inside `{ }` that
-    /// follows the move (empty string if there is no comment).
+    /// Called for each move token. `comment` is the text of any `{ }` that
+    /// immediately follows the move (empty if none).
     fn move_token(&mut self, mv: &str, comment: &str);
 
-    /// Called when the game ends (after the termination symbol).
+    /// Called when the game ends (after the termination symbol or EOF).
     fn end_pgn(&mut self);
 
-    /// Call this inside [`start_pgn`] (or any callback) to instruct the parser
-    /// to skip the rest of the current game's moves.  [`end_pgn`] will still be
-    /// called.
+    /// Set the skip flag to avoid receiving move events for the current game.
+    /// `end_pgn` is always called regardless.
     fn skip_pgn(&mut self, _skip: bool) {}
 
-    /// Returns whether the current game should be skipped.
-    /// The default implementation always returns `false`; override if you call
-    /// [`skip_pgn`] to store the flag.
+    /// Returns `true` if the current game should be skipped.
     fn skip(&self) -> bool {
         false
     }
 }
 
-// ---------------------------------------------------------------------------
-// StreamParser
-// ---------------------------------------------------------------------------
+// ─── StreamParser ────────────────────────────────────────────────────────────
 
-/// Streaming PGN parser.
-///
-/// Reads from any `std::io::Read` source and calls [`Visitor`] callbacks for
-/// each event.  Multiple games in the same stream are handled automatically.
+/// Streaming PGN parser. Reads from any [`std::io::Read`] source and fires
+/// [`Visitor`] callbacks. Handles multiple games and all standard termination
+/// symbols (`1-0`, `0-1`, `1/2-1/2`, `*`).
 pub struct StreamParser<R: Read> {
-    stream: StreamBuffer<R>,
+    reader: Reader<R>,
 }
 
 impl<R: Read> StreamParser<R> {
     pub fn new(reader: R) -> Self {
-        StreamParser {
-            stream: StreamBuffer::new(reader),
+        Self {
+            reader: Reader::new(reader),
         }
     }
 
-    /// Parse all games in the stream, calling `vis` for each event.
+    /// Parse all games, calling `vis` for every event.
     pub fn read_games<V: Visitor>(&mut self, vis: &mut V) -> Result<(), StreamParserError> {
-        if !self.stream.fill() {
+        if !self.reader.refill() {
             return Err(StreamParserError(StreamParserErrorCode::NotEnoughData));
         }
 
-        let mut in_header = true;
-        let mut in_body = false;
-        let mut pgn_end = true;
-        let mut dont_advance = false;
-
-        // Per-game scratch buffers
-        let mut header_key = StringBuffer::new();
-        let mut header_val = StringBuffer::new();
-        let mut mv_buf = StringBuffer::new();
-        let mut comment = String::new();
-
-        let mut error = StreamParserError::none();
-
-        'outer: while let Some(c) = self.stream.some() {
-            if in_header {
-                vis.skip_pgn(false);
-
-                if c == b'[' {
-                    vis.start_pgn();
-                    pgn_end = false;
-
-                    Self::process_header(
-                        &mut self.stream,
-                        vis,
-                        &mut header_key,
-                        &mut header_val,
-                        &mut in_header,
-                        &mut in_body,
-                        &mut error,
-                    );
-
-                    if error.has_error() {
-                        return Err(error);
+        loop {
+            // Advance to the opening '[' of the next game.
+            loop {
+                match self.reader.peek() {
+                    None => return Ok(()),
+                    Some(b'[') => break,
+                    _ => {
+                        self.reader.bump();
                     }
-                    dont_advance = false;
-                    continue;
-                }
-            } else if in_body {
-                Self::process_body(
-                    &mut self.stream,
-                    vis,
-                    &mut mv_buf,
-                    &mut comment,
-                    &mut in_header,
-                    &mut in_body,
-                    &mut pgn_end,
-                    &mut dont_advance,
-                    &mut error,
-                );
-
-                if error.has_error() {
-                    return Err(error);
-                }
-
-                if dont_advance {
-                    dont_advance = false;
-                    continue 'outer;
                 }
             }
 
-            if !dont_advance {
-                self.stream.advance();
-            }
-            dont_advance = false;
-        }
+            vis.skip_pgn(false);
+            vis.start_pgn();
 
-        if !pgn_end {
-            // flush the last game
-            Self::flush_move(vis, &mut mv_buf, &mut comment);
+            self.parse_headers(vis)?;
+
+            if !vis.skip() {
+                vis.start_moves();
+            }
+
+            self.parse_moves(vis)?;
+
             vis.end_pgn();
             vis.skip_pgn(false);
+        }
+    }
+
+    // ── Header parsing ───────────────────────────────────────────────────────
+    //
+    // Reads zero or more `[TagName "TagValue"]` lines until a blank line or a
+    // line that does not begin with `[`.
+
+    fn parse_headers<V: Visitor>(&mut self, vis: &mut V) -> Result<(), StreamParserError> {
+        let mut key = TokenBuf::new();
+        let mut val = TokenBuf::new();
+
+        loop {
+            self.reader.skip_while(|b| matches!(b, b' ' | b'\t'));
+
+            match self.reader.peek() {
+                None => return Ok(()),
+                Some(b'\n') => {
+                    self.reader.bump();
+                    return Ok(());
+                } // blank line
+                Some(b'[') => {
+                    self.reader.bump();
+                }
+                _ => return Ok(()), // non-tag → start of moves
+            }
+
+            // Tag name: everything up to whitespace
+            while let Some(b) = self.reader.peek() {
+                if is_ws(b) {
+                    break;
+                }
+                if !key.push(b) {
+                    return Err(StreamParserError(
+                        StreamParserErrorCode::ExceededMaxStringLength,
+                    ));
+                }
+                self.reader.bump();
+            }
+            self.reader.skip_while(|b| matches!(b, b' ' | b'\t'));
+
+            // Opening quote
+            if self.reader.peek() != Some(b'"') {
+                self.reader.skip_while(|b| b != b'\n');
+                key.clear();
+                val.clear();
+                continue;
+            }
+            self.reader.bump();
+
+            // Tag value with backslash-escape support
+            let mut backslash = false;
+            loop {
+                match self.reader.next() {
+                    None | Some(b'\n') => {
+                        return Err(StreamParserError(
+                            StreamParserErrorCode::InvalidHeaderMissingClosingQuote,
+                        ));
+                    }
+                    Some(b'\\') if !backslash => {
+                        backslash = true;
+                    }
+                    Some(b'"') if !backslash => break,
+                    Some(b) => {
+                        backslash = false;
+                        if !val.push(b) {
+                            return Err(StreamParserError(
+                                StreamParserErrorCode::ExceededMaxStringLength,
+                            ));
+                        }
+                    }
+                }
+            }
+
+            // Closing ']'
+            self.reader.skip_while(|b| matches!(b, b' ' | b'\t'));
+            if self.reader.peek() == Some(b']') {
+                self.reader.bump();
+            } else {
+                return Err(StreamParserError(
+                    StreamParserErrorCode::InvalidHeaderMissingClosingBracket,
+                ));
+            }
+
+            if !vis.skip() {
+                vis.header(key.as_str(), val.as_str());
+            }
+            key.clear();
+            val.clear();
+
+            // Skip remainder of the tag line
+            self.reader.skip_while(|b| b != b'\n');
+            if self.reader.peek() == Some(b'\n') {
+                self.reader.bump();
+            }
+        }
+    }
+
+    // ── Move parsing ─────────────────────────────────────────────────────────
+    //
+    // Dispatches on the first byte of each token:
+    //   digit      → move number  (N...N '.')  or termination  (1-0 / 0-1 / 1/2-1/2)
+    //   '*'        → bare game result
+    //   '['        → start of next game
+    //   '{' '(' '$'→ comment / variation / NAG
+    //   else       → SAN move token
+
+    fn parse_moves<V: Visitor>(&mut self, vis: &mut V) -> Result<(), StreamParserError> {
+        let mut mv = TokenBuf::new();
+        let mut comment = String::new();
+
+        'outer: loop {
+            self.reader.skip_while(is_ws);
+
+            let b = match self.reader.peek() {
+                None => break,
+                Some(b) => b,
+            };
+
+            match b {
+                b'[' => break, // next game starts
+
+                b'*' => {
+                    self.reader.bump();
+                    break;
+                }
+
+                b'{' => {
+                    // stand-alone comment (no preceding move)
+                    self.reader.bump();
+                    self.reader.drain_comment(&mut comment);
+                    if !vis.skip() {
+                        vis.move_token("", &comment);
+                    }
+                    comment.clear();
+                }
+
+                b'(' => {
+                    self.reader.bump();
+                    self.reader.skip_variation();
+                }
+                b'$' => {
+                    self.reader.bump();
+                    self.reader.skip_nag();
+                }
+
+                b'0'..=b'9' => {
+                    let first = b;
+                    let first_is_one = first == b'1';
+                    let first_is_zero = first == b'0';
+                    self.reader.bump();
+                    // peek at the character after `first` before consuming more digits
+                    let has_second_digit = self.reader.peek().map_or(false, |c| c.is_ascii_digit());
+                    self.reader.skip_while(|c| c.is_ascii_digit());
+
+                    match self.reader.peek() {
+                        Some(b'.') => {
+                            // move number — consume all dots (e.g. "1..." for Black)
+                            self.reader.skip_while(|c| c == b'.');
+                        }
+
+                        Some(b'-') if first_is_one && !has_second_digit => {
+                            // 1-0
+                            self.reader.bump(); // '-'
+                            self.reader.bump(); // '0'
+                            break 'outer;
+                        }
+
+                        Some(b'/') if first_is_one && !has_second_digit => {
+                            // 1/2-1/2  (6 chars after the leading '1': /2-1/2)
+                            for _ in 0..6 {
+                                self.reader.bump();
+                            }
+                            break 'outer;
+                        }
+
+                        Some(b'-') if first_is_zero && !has_second_digit => {
+                            self.reader.bump(); // consume '-'
+                            match self.reader.peek() {
+                                Some(b'1') => {
+                                    // 0-1
+                                    self.reader.bump();
+                                    break 'outer;
+                                }
+                                _ => {
+                                    // 0-0 or 0-0-0 castling written with zeros
+                                    if !mv.push(b'0') || !mv.push(b'-') {
+                                        return Err(StreamParserError(
+                                            StreamParserErrorCode::ExceededMaxStringLength,
+                                        ));
+                                    }
+                                    self.read_move_token(&mut mv)?;
+                                    self.read_move_appendix(&mut comment);
+                                    if !mv.is_empty() && !vis.skip() {
+                                        vis.move_token(mv.as_str(), &comment);
+                                    }
+                                    mv.clear();
+                                    comment.clear();
+                                }
+                            }
+                        }
+
+                        _ => {} // stray digits — skip
+                    }
+                }
+
+                _ => {
+                    // Regular SAN move (includes O-O castling, piece moves, …)
+                    self.read_move_token(&mut mv)?;
+                    self.read_move_appendix(&mut comment);
+                    if !mv.is_empty() && !vis.skip() {
+                        vis.move_token(mv.as_str(), &comment);
+                    }
+                    mv.clear();
+                    comment.clear();
+                }
+            }
+        }
+
+        // Flush any move that was being assembled when EOF was reached.
+        if !mv.is_empty() && !vis.skip() {
+            vis.move_token(mv.as_str(), &comment);
         }
 
         Ok(())
     }
 
-    // -----------------------------------------------------------------------
-    // Header processing
-    // -----------------------------------------------------------------------
-
-    fn process_header<V: Visitor>(
-        stream: &mut StreamBuffer<R>,
-        vis: &mut V,
-        key: &mut StringBuffer,
-        val: &mut StringBuffer,
-        in_header: &mut bool,
-        in_body: &mut bool,
-        error: &mut StreamParserError,
-    ) {
-        let mut backslash = false;
-
-        loop {
-            let c = match stream.some() {
-                Some(c) => c,
-                None => return,
-            };
-
-            match c {
-                b'[' => {
-                    stream.advance();
-                    // read tag name until whitespace
-                    while let Some(k) = stream.some() {
-                        if is_space(k) {
-                            break;
-                        }
-                        if !key.add(k) {
-                            *error =
-                                StreamParserError(StreamParserErrorCode::ExceededMaxStringLength);
-                            return;
-                        }
-                        stream.advance();
-                    }
-                    stream.advance(); // skip the space
-                }
-                b'"' => {
-                    stream.advance();
-                    loop {
-                        let k = match stream.some() {
-                            Some(k) => k,
-                            None => break,
-                        };
-                        if k == b'\\' {
-                            backslash = true;
-                            stream.advance();
-                        } else if k == b'"' && !backslash {
-                            stream.advance();
-                            // should now be at ']'
-                            if stream.current().unwrap_or(0) != b']' {
-                                *error = StreamParserError(
-                                    StreamParserErrorCode::InvalidHeaderMissingClosingBracket,
-                                );
-                                return;
-                            }
-                            stream.advance();
-                            break;
-                        } else if k == b'\n' {
-                            *error = StreamParserError(
-                                StreamParserErrorCode::InvalidHeaderMissingClosingQuote,
-                            );
-                            return;
-                        } else {
-                            backslash = false;
-                            if !val.add(k) {
-                                *error = StreamParserError(
-                                    StreamParserErrorCode::ExceededMaxStringLength,
-                                );
-                                return;
-                            }
-                            stream.advance();
-                        }
-                    }
-
-                    // skip stray carriage return
-                    if stream.current() == Some(b'\r') {
-                        stream.advance();
-                    }
-
-                    if !vis.skip() {
-                        vis.header(key.get(), val.get());
-                    }
-                    key.clear();
-                    val.clear();
-
-                    stream.advance();
-                }
-                b'\n' => {
-                    *in_header = false;
-                    *in_body = true;
-                    if !vis.skip() {
-                        vis.start_moves();
-                    }
-                    return;
-                }
-                _ => {
-                    // unexpected — treat as start of body
-                    *in_header = false;
-                    *in_body = true;
-                    if !vis.skip() {
-                        vis.start_moves();
-                    }
-                    return;
-                }
-            }
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Body processing
-    // -----------------------------------------------------------------------
-
-    fn process_body<V: Visitor>(
-        stream: &mut StreamBuffer<R>,
-        vis: &mut V,
-        mv_buf: &mut StringBuffer,
-        comment: &mut String,
-        in_header: &mut bool,
-        in_body: &mut bool,
-        pgn_end: &mut bool,
-        dont_advance: &mut bool,
-        error: &mut StreamParserError,
-    ) {
-        let mut is_termination = false;
-        let mut has_comment = false;
-
-        // ---- preliminary scan: skip move numbers, detect early termination ----
-        'pre: loop {
-            let c = match stream.some() {
-                Some(c) => c,
-                None => break 'pre,
-            };
-
-            if is_space(c) || is_digit(c) {
-                stream.advance();
-            } else if c == b'-' || c == b'*' || c == b'/' {
-                is_termination = true;
-                stream.advance();
-            } else if c == b'{' {
-                has_comment = true;
-                stream.advance();
-                while let Some(k) = stream.some() {
-                    stream.advance();
-                    if k == b'}' {
-                        break;
-                    }
-                    *comment += &(k as char).to_string();
-                }
-                if !vis.skip() {
-                    vis.move_token("", comment);
-                    has_comment = false;
-                    comment.clear();
-                }
-            } else {
-                break 'pre;
-            }
-        }
-
-        if !vis.skip() && has_comment && !is_termination {
-            // re-run preliminary scan (mirrors C++ goto start)
-            return;
-        }
-
-        if is_termination {
-            Self::on_end(vis, mv_buf, comment, in_header, in_body, pgn_end);
-            *dont_advance = true;
-            return;
-        }
-
-        // skip whitespace
-        while let Some(c) = stream.some() {
-            if is_space(c) {
-                stream.advance();
-            } else {
+    /// Read a SAN token: bytes until whitespace or a structural character.
+    fn read_move_token(&mut self, mv: &mut TokenBuf) -> Result<(), StreamParserError> {
+        while let Some(b) = self.reader.peek() {
+            if is_ws(b) || matches!(b, b'{' | b'(' | b')' | b'$' | b'[') {
                 break;
             }
+            if !mv.push(b) {
+                return Err(StreamParserError(
+                    StreamParserErrorCode::ExceededMaxStringLength,
+                ));
+            }
+            self.reader.bump();
         }
+        Ok(())
+    }
 
-        // ---- main move loop ----
+    /// Consume any sequence of `{comment}`, `(variation)`, `$NAG`, and
+    /// whitespace that follows a move token.  Fills `comment` with the text
+    /// of the first (or only) `{ }` block.
+    fn read_move_appendix(&mut self, comment: &mut String) {
         loop {
-            let cd = match stream.some() {
-                Some(c) => c,
-                None => {
-                    Self::on_end(vis, mv_buf, comment, in_header, in_body, pgn_end);
-                    *dont_advance = true;
-                    return;
+            self.reader.skip_while(is_ws);
+            match self.reader.peek() {
+                Some(b'{') => {
+                    self.reader.bump();
+                    self.reader.drain_comment(comment);
                 }
-            };
-
-            // '[' starts a new PGN while we're in the body
-            if cd == b'[' {
-                Self::on_end(vis, mv_buf, comment, in_header, in_body, pgn_end);
-                *dont_advance = true;
-                return;
-            }
-
-            // skip move number digits
-            while let Some(c) = stream.some() {
-                if is_space(c) || is_digit(c) {
-                    stream.advance();
-                } else {
-                    break;
+                Some(b'(') => {
+                    self.reader.bump();
+                    self.reader.skip_variation();
                 }
-            }
-
-            // skip dots
-            while let Some(c) = stream.some() {
-                if c == b'.' {
-                    stream.advance();
-                } else {
-                    break;
+                Some(b'$') => {
+                    self.reader.bump();
+                    self.reader.skip_nag();
                 }
-            }
-
-            // skip spaces
-            while let Some(c) = stream.some() {
-                if is_space(c) {
-                    stream.advance();
-                } else {
-                    break;
-                }
-            }
-
-            // parse move
-            if Self::parse_move(stream, vis, mv_buf, comment, error) {
-                if error.has_error() {
-                    return;
-                }
-                break;
-            }
-
-            // skip spaces
-            while let Some(c) = stream.some() {
-                if is_space(c) {
-                    stream.advance();
-                } else {
-                    break;
-                }
-            }
-
-            let curr = match stream.current() {
-                Some(c) => c,
-                None => {
-                    Self::on_end(vis, mv_buf, comment, in_header, in_body, pgn_end);
-                    *dont_advance = true;
-                    return;
-                }
-            };
-
-            // '*' — game termination
-            if curr == b'*' {
-                Self::on_end(vis, mv_buf, comment, in_header, in_body, pgn_end);
-                stream.advance();
-                *dont_advance = true;
-                return;
-            }
-
-            let peek = stream.peek().unwrap_or(0);
-
-            if curr == b'1' {
-                if peek == b'-' {
-                    // 1-0
-                    stream.advance();
-                    stream.advance();
-                    Self::on_end(vis, mv_buf, comment, in_header, in_body, pgn_end);
-                    *dont_advance = true;
-                    return;
-                } else if peek == b'/' {
-                    // 1/2-1/2 (7 chars: 1 / 2 - 1 / 2)
-                    for _ in 0..=6 {
-                        stream.advance();
-                    }
-                    Self::on_end(vis, mv_buf, comment, in_header, in_body, pgn_end);
-                    *dont_advance = true;
-                    return;
-                }
-            }
-
-            // '0' — might be 0-1 or 0-0[-0] castling
-            if curr == b'0' && peek == b'-' {
-                stream.advance(); // skip '0'
-                stream.advance(); // skip '-'
-
-                let c = match stream.current() {
-                    Some(c) => c,
-                    None => {
-                        Self::on_end(vis, mv_buf, comment, in_header, in_body, pgn_end);
-                        *dont_advance = true;
-                        return;
-                    }
-                };
-
-                if c == b'1' {
-                    // 0-1
-                    Self::on_end(vis, mv_buf, comment, in_header, in_body, pgn_end);
-                    stream.advance();
-                    *dont_advance = true;
-                    return;
-                } else {
-                    // castling written as 0-0[-0]
-                    if !mv_buf.add(b'0') || !mv_buf.add(b'-') {
-                        *error = StreamParserError(StreamParserErrorCode::ExceededMaxStringLength);
-                        return;
-                    }
-                    if Self::parse_move(stream, vis, mv_buf, comment, error) {
-                        stream.advance();
-                        break;
-                    }
-                }
-            }
-
-            // Check if we've consumed everything (e.g. EOF mid-game)
-            if stream.some().is_none() {
-                Self::on_end(vis, mv_buf, comment, in_header, in_body, pgn_end);
-                *dont_advance = true;
-                return;
+                _ => break,
             }
         }
-    }
-
-    /// Read one move token (stops at whitespace).  Then parse any appendix
-    /// (comments, variations, NAGs).  Returns `true` if parsing should stop
-    /// (EOF encountered mid-appendix).
-    fn parse_move<V: Visitor>(
-        stream: &mut StreamBuffer<R>,
-        vis: &mut V,
-        mv_buf: &mut StringBuffer,
-        comment: &mut String,
-        error: &mut StreamParserError,
-    ) -> bool {
-        // read token chars
-        while let Some(c) = stream.some() {
-            if is_space(c) {
-                break;
-            }
-            if !mv_buf.add(c) {
-                *error = StreamParserError(StreamParserErrorCode::ExceededMaxStringLength);
-                return true;
-            }
-            stream.advance();
-        }
-
-        Self::parse_move_appendix(stream, vis, mv_buf, comment, error)
-    }
-
-    /// After the move token, consume any `{ comment }`, `( variation )`,
-    /// `$NAG`, or whitespace.  Returns `true` when the outer loop should stop.
-    fn parse_move_appendix<V: Visitor>(
-        stream: &mut StreamBuffer<R>,
-        vis: &mut V,
-        mv_buf: &mut StringBuffer,
-        comment: &mut String,
-        _error: &mut StreamParserError,
-    ) -> bool {
-        loop {
-            let curr = match stream.current() {
-                Some(c) => c,
-                None => {
-                    // EOF — emit the last move and signal stop
-                    Self::flush_move(vis, mv_buf, comment);
-                    return true;
-                }
-            };
-
-            match curr {
-                b'{' => {
-                    stream.advance();
-                    while let Some(c) = stream.some() {
-                        stream.advance();
-                        if c == b'}' {
-                            break;
-                        }
-                        *comment += &(c as char).to_string();
-                    }
-                }
-                b'(' => {
-                    stream.skip_until(b'(', b')');
-                }
-                b'$' => {
-                    while let Some(c) = stream.some() {
-                        if is_space(c) {
-                            break;
-                        }
-                        stream.advance();
-                    }
-                }
-                b' ' | b'\t' | b'\n' => {
-                    while let Some(c) = stream.some() {
-                        if !is_space(c) {
-                            break;
-                        }
-                        stream.advance();
-                    }
-                }
-                _ => {
-                    Self::flush_move(vis, mv_buf, comment);
-                    return false;
-                }
-            }
-        }
-    }
-
-    fn flush_move<V: Visitor>(vis: &mut V, mv_buf: &mut StringBuffer, comment: &mut String) {
-        if !mv_buf.is_empty() {
-            if !vis.skip() {
-                vis.move_token(mv_buf.get(), comment.as_str());
-            }
-            mv_buf.clear();
-            comment.clear();
-        }
-    }
-
-    fn on_end<V: Visitor>(
-        vis: &mut V,
-        mv_buf: &mut StringBuffer,
-        comment: &mut String,
-        in_header: &mut bool,
-        in_body: &mut bool,
-        pgn_end: &mut bool,
-    ) {
-        Self::flush_move(vis, mv_buf, comment);
-        vis.end_pgn();
-        vis.skip_pgn(false);
-        *in_header = true;
-        *in_body = false;
-        *pgn_end = true;
     }
 }
 
-// ---------------------------------------------------------------------------
-// Char helpers
-// ---------------------------------------------------------------------------
+// ─── Helpers ─────────────────────────────────────────────────────────────────
 
 #[inline]
-fn is_space(c: u8) -> bool {
-    matches!(c, b' ' | b'\t' | b'\n' | b'\r')
-}
-
-#[inline]
-fn is_digit(c: u8) -> bool {
-    c >= b'0' && c <= b'9'
+fn is_ws(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\n' | b'\r')
 }
 
 // ---------------------------------------------------------------------------
@@ -830,7 +620,10 @@ mod tests {
     fn parse(pgn: &[u8]) -> Recorder {
         let mut cursor = Cursor::new(pgn);
         let mut vis = Recorder::default();
-        StreamParser::new(&mut cursor).read_games(&mut vis).unwrap();
+
+        StreamParser::<_, 1>::new(&mut cursor)
+            .read_games(&mut vis)
+            .unwrap();
         vis
     }
 
